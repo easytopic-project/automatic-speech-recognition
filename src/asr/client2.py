@@ -20,9 +20,9 @@ def transcribeAudio(path_to_audio_file, samplerate=16000):
 
             conn.request("POST", "/client/dynamic/recognize",
                          body, headers)
-            response = conn.getresponse().read().decode("UTF-8")
-            conn.close()
+            response = conn.getresponse().read()
         finally:
+            conn.close()
             audio_file.close()
 
         return response
@@ -47,4 +47,5 @@ def main(audio_chunk):
                     succes = True
             except Exception as e:
                 print('trying again', flush=True)
-                time.sleep(0.5)
+                print(e, flush=True)
+                time.sleep(5)

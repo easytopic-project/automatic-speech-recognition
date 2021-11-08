@@ -1,8 +1,6 @@
 import pika
 import time
-from DAO.connection import Connection
 import os
-import multiprocessing
 import json
 import logging
 import ast
@@ -15,6 +13,10 @@ LOG_FORMAT = ('%(levelname) -10s %(asctime)s %(name) -30s %(funcName) '
               '-35s %(lineno) -5d: %(message)s')
 LOGGER = logging.getLogger(__name__)
 
+FILES_SERVER = os.environ.get("FILES_SERVER", "localhost:3001") 
+QUEUE_SERVER_HOST, QUEUE_SERVER_PORT = os.environ.get("QUEUE_SERVER", "localhost:5672").split(":")
+Q_IN = os.environ.get("INPUT_QUEUE_NAME", "audio_extractor_in")
+Q_OUT = os.environ.get("OUTPUT_QUEUE_NAME", "audio_extractor_out")
 
 def callback(channel, method, properties, body, args):
 
@@ -30,43 +32,32 @@ def do_work(connection, channel, delivery_tag, body):
     try:
         print(" [x] Received %r" % body, flush=True)
         args = json.loads(body)
-        oid = args['oid']
-        project_id = args['project_id']
-        # conn = Connection()
-        # file = conn.get_file(oid)
-        # file = conn.get_doc_mongo(file_oid=oid)
-        file  = download(args['file'], buffer=True)
+        file  = download(args['file']['name'], url="http://" + FILES_SERVER, buffer=True)
 
         result = ast.literal_eval(file.decode('utf-8'))
 
         count = 0
         dict_result = {}
-        previous_duration = 0
         for key, value in result.items():
             result = main(value['bytes'])
             dict_result[count] = result
             count += 1
-            #time.sleep(1)
 
         payload = bytes(str(dict_result), encoding='utf-8')
-        uploaded = upload(payload, buffer=True, mime='text/plain')
-        conn = Connection()
-        #  inserts the result of processing in database
-        file_oid = conn.insert_doc_mongo(payload)
-        conn.insert_jobs(type='asr', status='done',
-                         file=file_oid, project_id=project_id)
+        uploaded = upload(payload, url="http://" + FILES_SERVER, buffer=True, mime='text/plain')
 
-        message = {'type': 'aggregator', 'status': 'new',
-                   'oid': file_oid, 'project_id': project_id, 'file': uploaded['name'], 'queue': 'asr'}
+        message = {
+                **args,
+                'asr': uploaded,
+                }
 
-        #  post a message on topic_segmentation queue
         connection_out = pika.BlockingConnection(
-            pika.ConnectionParameters(host=os.environ['QUEUE_SERVER']))
+            pika.ConnectionParameters(host=QUEUE_SERVER_HOST, port=QUEUE_SERVER_PORT))
         channel2 = connection_out.channel()
 
-        channel2.queue_declare(queue='aggregator', durable=True)
+        channel2.queue_declare(queue=Q_OUT, durable=True)
         channel2.basic_publish(
-            exchange='', routing_key='aggregator', body=json.dumps(message))
+            exchange='', routing_key=Q_OUT, body=json.dumps(message))
 
     except Exception as e:
         print('Connection Error %s' % e, flush=True)
@@ -87,14 +78,13 @@ def ack_message(channel, delivery_tag):
         pass
 
 
-
 def consume():
     logging.info('[x] start consuming')
     success = False
     while not success:
         try:
             connection = pika.BlockingConnection(
-                pika.ConnectionParameters(host=os.environ['QUEUE_SERVER'], heartbeat=5))
+                pika.ConnectionParameters(host=QUEUE_SERVER_HOST, port=QUEUE_SERVER_PORT, heartbeat=5))
             channel = connection.channel()
             success = True
         except:
@@ -102,14 +92,15 @@ def consume():
 
             pass
 
-    channel.queue_declare(queue='asr', durable=True)
+    channel.queue_declare(queue=Q_IN, durable=True)
+    channel.queue_declare(queue=Q_OUT, durable=True)
     print(' [*] Waiting for messages. To exit press CTRL+C')
     channel.basic_qos(prefetch_count=1)
 
     threads = []
     on_message_callback = functools.partial(
         callback, args=(connection, threads))
-    channel.basic_consume(queue='asr', on_message_callback=on_message_callback)
+    channel.basic_consume(queue=Q_IN, on_message_callback=on_message_callback)
     try:
         channel.start_consuming()
     except KeyboardInterrupt:
@@ -121,20 +112,4 @@ def consume():
 
     connection.close()
 
-
 consume()
-
-'''
-workers = int(os.environ['NUM_WORKERS'])
-pool = multiprocessing.Pool(processes=workers)
-for i in range(0, workers):
-    pool.apply_async(consume)
-
-# Stay alive
-try:
-    while True:
-        continue
-except KeyboardInterrupt:
-    print(' [*] Exiting...')
-    pool.terminate()
-    pool.join()'''
